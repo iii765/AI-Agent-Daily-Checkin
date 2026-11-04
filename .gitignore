@@ -1,0 +1,14 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Personal check-in logs & state (contains account/session info)
+logs/
+*.log
+
+# Virtual environments & IDE
+.venv/
+venv/
+.idea/
+.vscode/
