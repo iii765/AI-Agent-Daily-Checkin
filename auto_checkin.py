@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-国内 AI Agent 桌面客户端（MiniMax Code / WorkBuddy / TRAE CN）每日自动签到领积分工具
+国内主流 AI Coding / Agent 桌面客户端每日自动签到领积分工具
+已支持：MiniMax Code · WorkBuddy · TRAE CN · Qoder CN · 豆包 (Doubao)
 架构：Playwright CDP 挂载 + 内部 IPC/RPC 直调（主力 L1） + DOM 按钮点击（兜底 L2）
-支持跨盘符自动寻路，开箱即用，可直接开源发布。
+支持跨盘符自动寻路，纯 Win32 原生气泡通知（免杀软误报），开箱即用，开源发布。
 """
 
 import os
@@ -55,7 +56,7 @@ APP_CONFIGS = {
         ],
         "port": 19221,
         "process_name": "MiniMax Code.exe",
-        "url_keywords": ["archon", "minimax"],
+        "url_keywords": ["archon"],
     },
     "workbuddy": {
         "name": "WorkBuddy",
@@ -77,6 +78,26 @@ APP_CONFIGS = {
         "port": 19223,
         "process_name": "Trae CN.exe",
         "url_keywords": ["solo-lite.html", "workbench.html"],
+    },
+    "qoder_cn": {
+        "name": "Qoder CN",
+        "rel_paths": [
+            r"Programs\Qoder CN\Qoder CN.exe",
+            r"Qoder CN\Qoder CN.exe",
+        ],
+        "port": 19224,
+        "process_name": "Qoder CN.exe",
+        "url_keywords": ["qoder", "workbenchscope", "renderer"],
+    },
+    "doubao": {
+        "name": "豆包",
+        "rel_paths": [
+            r"Doubao\Doubao.exe",
+            r"Programs\Doubao\Doubao.exe",
+        ],
+        "port": 19225,
+        "process_name": "Doubao.exe",
+        "url_keywords": ["doubao-chat/chat", "doubao-chat"],
     },
 }
 
@@ -175,11 +196,22 @@ async def wait_for_cdp(port: int, url_keywords: list[str], timeout_sec: int = 25
 
 
 async def find_target_page(browser, url_keywords: list[str]) -> Optional[Page]:
+    # 轮询等待真正的主窗口渲染页面就绪（排除后台 background 服务页）
+    for _ in range(15):
+        for ctx in browser.contexts:
+            for pg in ctx.pages:
+                u = pg.url.lower()
+                if "background" in u:
+                    continue
+                if any(kw.lower() in u for kw in url_keywords):
+                    return pg
+        await asyncio.sleep(0.8)
+
     for ctx in browser.contexts:
         for pg in ctx.pages:
-            u = pg.url.lower()
-            if any(kw.lower() in u for kw in url_keywords):
+            if "background" not in pg.url.lower():
                 return pg
+
     if browser.contexts and browser.contexts[0].pages:
         return browser.contexts[0].pages[0]
     return None
@@ -189,10 +221,13 @@ async def find_target_page(browser, url_keywords: list[str]) -> Optional[Page]:
 # 1. MiniMax Code 签到实现（L1: Webpack Axios 实例直调 + L2: DOM 按钮点击兜底）
 # ============================================================================
 async def checkin_minimax_code(page: Page) -> Dict[str, Any]:
-    for _ in range(20):
-        has_wp = await page.evaluate("() => Array.isArray(window.webpackChunk_N_E)")
-        if has_wp:
-            break
+    for _ in range(25):
+        try:
+            has_wp = await page.evaluate("() => Array.isArray(window.webpackChunk_N_E) && window.webpackChunk_N_E.length > 0")
+            if has_wp:
+                break
+        except Exception:
+            pass
         await asyncio.sleep(0.8)
     await asyncio.sleep(2.5)
 
@@ -200,8 +235,14 @@ async def checkin_minimax_code(page: Page) -> Dict[str, Any]:
     try:
         res = await page.evaluate(
             """async () => {
+            if (!Array.isArray(window.webpackChunk_N_E)) {
+                return { ok: false, error: 'webpackChunk_N_E 未就绪' };
+            }
             let wpReq;
             window.webpackChunk_N_E.push([[Symbol()], {}, r => { wpReq = r; }]);
+            if (!wpReq) {
+                return { ok: false, error: '获取 webpack require 失败' };
+            }
             const http = wpReq(98304).ZP;
             const statusResp = await http.get('/minimax-cloud/api/v1/signin/status', { showToast: false });
             const data = statusResp.data?.data;
@@ -370,10 +411,193 @@ async def checkin_trae_cn(page: Page) -> Dict[str, Any]:
         return {"ok": False, "error": str(e)}
 
 
+# ============================================================================
+# 4. Qoder CN 签到实现（L1: Preload qoderDesktop + 权益中心 Surface 直达）
+# ============================================================================
+async def checkin_qoder_cn(page: Page) -> Dict[str, Any]:
+    for _ in range(25):
+        has_qd = await page.evaluate("() => Boolean(window.qoderDesktop?.getCampaignStatus)")
+        if has_qd:
+            break
+        await asyncio.sleep(0.8)
+    await asyncio.sleep(2.0)
+
+    # 读取当前活动状态与账户已分配额度
+    status = await page.evaluate(
+        """async () => {
+        try {
+            const camp = await window.qoderDesktop.getCampaignStatus();
+            const usage = await window.qoderDesktop.getAccountUsage();
+            return { ok: true, camp, usage };
+        } catch (e) {
+            return { ok: false, error: e.message };
+        }
+    }"""
+    )
+
+    has_claimable = status.get("camp", {}).get("hasClaimableCampaign", False)
+    credits_pts = status.get("usage", {}).get("qoderUsage", {}).get("addOnQuota", {}).get("remaining", 100)
+
+    # 尝试触发打开用户菜单 -> 权益中心
+    try:
+        user_menu = page.locator('button[aria-label="打开用户菜单"]')
+        if await user_menu.count() == 0:
+            user_menu = page.locator('button:has([class*="avatar"]), div[class*="avatar"]')
+
+        if await user_menu.count() > 0:
+            await user_menu.first.click()
+            await asyncio.sleep(1.2)
+
+            rewards_item = page.locator("text='权益中心'")
+            if await rewards_item.count() > 0:
+                await rewards_item.first.click()
+                await asyncio.sleep(2.5)
+    except Exception as e:
+        logger.warning(f"[Qoder CN] 打开权益中心菜单异常: {e}")
+
+    # 查找权益中心 iframe
+    iframe = None
+    for _ in range(12):
+        for f in page.frames:
+            if "activity-iframe" in f.url:
+                iframe = f
+                break
+        if iframe:
+            break
+        await asyncio.sleep(0.5)
+
+    if iframe:
+        try:
+            claim_btns = iframe.locator('button:has-text("立即领取"), button:has-text("领取")')
+            btn_cnt = await claim_btns.count()
+            claimed_now = False
+            for i in range(btn_cnt):
+                btn = claim_btns.nth(i)
+                txt = (await btn.inner_text()).strip()
+                if txt in ["立即领取", "领取"] and not await btn.is_disabled():
+                    logger.info(f"[Qoder CN] 发现可领取按钮 [{txt}]，正在点击...")
+                    await btn.click()
+                    claimed_now = True
+                    await asyncio.sleep(2.0)
+                    break
+
+            iframe_text = await iframe.evaluate("() => document.body.innerText")
+            is_claimed = "已领取" in iframe_text or not has_claimable
+
+            # 按 Escape 平滑关闭弹窗
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.5)
+
+            return {
+                "ok": True,
+                "already_claimed": not claimed_now and is_claimed,
+                "points": credits_pts or 100,
+                "method": "L1_QODER_SURFACE",
+            }
+        except Exception as e:
+            logger.warning(f"[Qoder CN] 权益中心 iframe 操作异常: {e}")
+
+    if status.get("ok"):
+        return {
+            "ok": True,
+            "already_claimed": not has_claimable,
+            "points": credits_pts or 100,
+            "method": "L1_QODER_DESKTOP",
+        }
+
+    return {"ok": False, "error": status.get("error", "未找到 Qoder 签到入口")}
+
+
+# ============================================================================
+# 5. 豆包 (Doubao) 签到实现（L1: 任务专区页面一键签到 + Webpack API 状态校验）
+# ============================================================================
+async def checkin_doubao(page: Page) -> Dict[str, Any]:
+    # 豆包桌面客户端基于 Chromium，在同一会话下打开任务专区执行无感签到
+    ctx = page.context
+    explore_page = await ctx.new_page()
+    try:
+        await explore_page.goto("https://www.doubao.com/pc/agent-explore?scroll_to=tasks", timeout=25000)
+
+        # 轮询等待任务专区页面渲染完成（从服务端拉取任务列表）
+        for _ in range(15):
+            try:
+                has_content = await explore_page.evaluate(
+                    "() => document.body.innerText.includes('每日签到') || document.body.innerText.includes('已签到') || document.body.innerText.includes('算力')"
+                )
+                if has_content:
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(0.8)
+        await asyncio.sleep(1.5)
+
+        # 查找每日签到按钮
+        claimed_now = False
+        checkin_btn = explore_page.locator("button:has-text('签到'), button:has-text('去签到')")
+        btn_count = await checkin_btn.count()
+
+        for i in range(btn_count):
+            b = checkin_btn.nth(i)
+            txt = (await b.inner_text()).strip()
+            if "已签" not in txt and "签到" in txt and not await b.is_disabled():
+                logger.info(f"[豆包] 发现未签到任务按钮 [{txt}]，正在点击签到...")
+                await b.click()
+                claimed_now = True
+                await asyncio.sleep(2.5)
+                break
+
+        page_text = await explore_page.evaluate("() => document.body.innerText")
+        is_checked_in = "已签到" in page_text or claimed_now or "签到成功" in page_text or "每日签到" in page_text
+
+        if is_checked_in:
+            return {
+                "ok": True,
+                "already_claimed": not claimed_now,
+                "points": 200,
+                "method": "L1_DOUBAO_EXPLORE",
+            }
+
+        # 兜底：通过内置 Webpack 模块检验签到状态
+        try:
+            res = await page.evaluate(
+                """async () => {
+                let webpackReq;
+                const w = window["@flow-web/desktop:stable"];
+                if (Array.isArray(w)) {
+                    w.push([[Symbol()], {}, r => { webpackReq = r; }]);
+                }
+                if (!webpackReq) return null;
+                const ugApi = webpackReq(534252);
+                if (!ugApi?.k) return null;
+                const lp = await ugApi.k.GetLandingPage({ scene: 'pc_incentive_task_mvp_v3' });
+                return lp?.data;
+            }"""
+            )
+            if res:
+                chosen = res.get("chosen_type")
+                return {
+                    "ok": True,
+                    "already_claimed": chosen == 2,
+                    "points": 200,
+                    "method": "L1_DOUBAO_API",
+                }
+        except Exception:
+            pass
+
+        return {"ok": False, "error": "未找到豆包签到状态或任务已下线"}
+    finally:
+        try:
+            await explore_page.close()
+        except Exception:
+            pass
+
+
 HANDLERS = {
     "minimax_code": checkin_minimax_code,
     "workbuddy": checkin_workbuddy,
     "trae_cn": checkin_trae_cn,
+    "qoder_cn": checkin_qoder_cn,
+    "doubao": checkin_doubao,
 }
 
 

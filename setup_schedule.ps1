@@ -23,7 +23,7 @@ $Shortcut.TargetPath = $PythonW
 $Shortcut.Arguments = "`"$ScriptPath`""
 $Shortcut.WorkingDirectory = $PSScriptRoot
 $Shortcut.WindowStyle = 7
-$Shortcut.Description = "Daily auto check-in for MiniMax Code, WorkBuddy, and TRAE CN"
+$Shortcut.Description = "Daily auto check-in for MiniMax Code, WorkBuddy, TRAE CN, Qoder CN, and Doubao"
 $Shortcut.Save()
 
 # 3. Patch Desktop/StartMenu Shortcuts with --remote-debugging-port so running apps never need restart at 00:05!
@@ -31,6 +31,9 @@ $PortMap = @{
     "MiniMax Code.lnk" = "--remote-debugging-port=19221"
     "WorkBuddy.lnk"    = "--remote-debugging-port=19222"
     "TRAE CN.lnk"      = "--remote-debugging-port=19223"
+    "Qoder CN.lnk"     = "--remote-debugging-port=19224"
+    "豆包.lnk"         = "--remote-debugging-port=19225"
+    "Doubao.lnk"       = "--remote-debugging-port=19225"
 }
 $SearchDirs = @(
     [Environment]::GetFolderPath("Desktop"),

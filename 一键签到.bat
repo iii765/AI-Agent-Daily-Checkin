@@ -1,9 +1,9 @@
 @echo off
 chcp 65001 >nul
-title AI 客户端每日自动签到领积分 (MiniMax Code / WorkBuddy / TRAE CN)
+title AI 客户端每日自动签到领积分 (MiniMax Code / WorkBuddy / TRAE CN / Qoder CN / 豆包)
 cd /d "%~dp0"
 echo ============================================================
-echo   正在执行 AI 客户端每日签到 (MiniMax Code / WorkBuddy / TRAE CN)
+echo   正在执行 AI 客户端每日签到 (5 款主流桌面助手全自动领积分)
 echo ============================================================
 python "%~dp0auto_checkin.py" --force
 echo.

@@ -2,7 +2,8 @@
 
 # 🚀 AI-Agent-Daily-Checkin
 
-**国内主流 AI Coding / Agent 桌面客户端（MiniMax Code · WorkBuddy · TRAE CN）每日自动签到领积分工具**
+**国内主流 AI Coding / Agent 桌面客户端每日自动签到领积分工具**  
+*MiniMax Code · WorkBuddy · TRAE CN · Qoder CN · 豆包 (Doubao)*
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Playwright CDP](https://img.shields.io/badge/Engine-Playwright%20CDP%20%2B%20IPC-2EAD33?logo=playwright&logoColor=white)](https://playwright.dev/)
@@ -17,24 +18,24 @@
 
 ## 💡 为什么做这个项目？
 
-国内多款优秀的 AI 编程与桌面助手（如 **MiniMax Code**、**WorkBuddy**、**TRAE CN**）提供了慷慨的「每日签到送免费积分 / Credits」福利。但每天手动打开三四个客户端挨个找入口点击非常繁琐，一旦忘记还会断签错失满签大奖。
+国内多款优秀的 AI 编程与桌面助手（如 **MiniMax Code**、**WorkBuddy**、**TRAE CN**、**Qoder CN**、**豆包**）提供了慷慨的「每日签到送免费积分 / 算力 / Credits」福利。但每天手动打开三五个客户端挨个找入口点击非常繁琐，一旦忘记还会断签错失满签大奖。
 
 如果使用基于多模态视觉大模型的 `Computer Use`（截屏 $\rightarrow$ VLM 识别坐标 $\rightarrow$ 模拟鼠标点击）来签到：
 - ❌ **算力倒挂**：每次截屏调用视觉模型的 Token 成本甚至高于领到的积分价值；
 - ❌ **抢占焦点**：执行时会强行把窗口置顶并抢走你正在写代码的鼠标；
 - ❌ **脆弱易断**：遇到版本更新弹窗、活动海报遮挡或分辨率变化极易点偏。
 
-**本项目采用更优雅的工程解法**：由于这些客户端 **100% 基于 Electron（Chromium 内核）构建**，我们直接通过 **CDP（Chrome DevTools Protocol）** 挂载进渲染进程，**在内存里直接调用客户端内置的已鉴权 IPC 通道或带签名 Axios 实例完成签到**，全程无需移动鼠标、无惧任何弹窗遮挡！
+**本项目采用更优雅的工程解法**：由于这些客户端 **100% 基于 Electron 或 Chromium 内核构建**，我们直接通过 **CDP（Chrome DevTools Protocol）** 挂载进渲染进程，**在内存里直接调用客户端内置的已鉴权 IPC 通道、带签名 Axios 实例或专用任务专区完成签到**，全程无需移动鼠标、无惧任何弹窗遮挡！
 
 ---
 
 ## ✨ 核心特性
 
 - 🎯 **L1 内部协议直调 + L2 DOM 按钮兜底**：
-  - 优先在渲染进程内直接调用应用原生签到方法（`Webpack 内部 Axios` / `Preload IPC` / `VSCode Sandbox IPC`），即使界面被更新弹窗遮挡也能 100% 签到成功。
+  - 优先在渲染进程内直接调用应用原生签到方法（`Webpack 内部 Axios` / `Preload IPC` / `VSCode Sandbox IPC` / `活动专区 API`），即使界面被更新弹窗遮挡也能 100% 签到成功。
   - 若未来版本内部函数签名变更，自动降级为 Playwright DOM 选择器点击兜底。
 - 👻 **零打扰后台运行（Non-Disruptive）**：
-  - **未打开软件时**：通过 Windows `SW_SHOWMINNOACTIVE` 标志在后台最小化拉起，**绝不抢占你当前写代码的键盘与鼠标焦点**，4~6 秒签完即自动清理进程树，零内存驻留。
+  - **未打开软件时**：通过 Windows `SW_SHOWMINNOACTIVE` 标志在后台最小化拉起，**绝不抢占你当前写代码的键盘与鼠标焦点**，4~8 秒签完即自动清理进程树，零内存驻留。
   - **正在使用软件时**：安装脚本自动为桌面快捷方式注入调试端口，定时任务触发时**直接无感附着到你正在使用的窗口**，0.5 秒领完积分，**绝不关闭或重启你正在干活的软件**。
 - ⚡ **0.001 秒防重复秒退**：
   - 每日签到状态与积分明细自动持久化至本地 `logs/checkin_history.json`，当天已全部签过时再次触发（如开机自启复查）会在 `0.001 秒` 内静默退出。
@@ -65,11 +66,13 @@ flowchart LR
 
 ### 各客户端逆向通道一览
 
-| 客户端 | 默认调试端口 | L1 内部直调通道（主力） | L2 DOM 选择器（兜底） |
-| :--- | :---: | :--- | :--- |
-| **MiniMax Code** | `19221` | 通过 `window.webpackChunk_N_E` 提取内置带签名拦截器的 Axios 实例（模块 `98304`），自动携带 `yy` / `x-signature` 调 `POST /minimax-cloud/api/v1/signin/claim` | `button.signin-claim-button` |
-| **WorkBuddy** | `19222` | 调用 Preload 暴露的 `window.__wbInvoke('auth:getCheckinStatus')` 与 `window.__wbInvoke('auth:claimDailyCheckin')` | `button:has-text('立即领取')` |
-| **TRAE CN** | `19223` | 调用 `window.vscode.ipcRenderer.invoke('vscode:sandbox::main-invoke-claimCheckinCredits', 'account_menu')` 并自动检测参与 `participateCheckinLottery` 抽奖 | 账号菜单签到入口 |
+| 客户端 | 默认调试端口 | L1 内部直调通道（主力） | L2 DOM 选择器（兜底） | 典型每日积分收益 |
+| :--- | :---: | :--- | :--- | :---: |
+| **MiniMax Code** | `19221` | 通过 `window.webpackChunk_N_E` 提取内置带签名拦截器的 Axios 实例（模块 `98304`），自动携带 `yy` / `x-signature` 调 `POST /minimax-cloud/api/v1/signin/claim` | `button.signin-claim-button` | **+400~1000 积分** |
+| **WorkBuddy** | `19222` | 调用 Preload 暴露的 `window.__wbInvoke('auth:getCheckinStatus')` 与 `window.__wbInvoke('auth:claimDailyCheckin')` | `button:has-text('立即领取')` | **+100 积分 (连签加成)** |
+| **TRAE CN** | `19223` | 调用 `window.vscode.ipcRenderer.invoke('vscode:sandbox::main-invoke-claimCheckinCredits', 'account_menu')` 并自动检测参与 `participateCheckinLottery` 抽奖 | 账号菜单签到入口 | **+200~300 Credits** |
+| **Qoder CN** | `19224` | 通过 `window.qoderDesktop` 监测活动状态，唤起权益中心 Surface 自动完成 `01a159a1` 每日 100 Credits 任务领取 | 权益中心卡片按钮 | **+100 Credits** |
+| **豆包 (Doubao)** | `19225` | 在 Chromium 容器同会话下无感直连 `pc/agent-explore?scroll_to=tasks` 触发签到，并通过 `UgCampaignApiService` 校验状态 | 每日签到专区按钮 | **+200 算力** |
 
 ---
 
@@ -77,7 +80,7 @@ flowchart LR
 
 ### 1. 环境准备
 
-确保已安装 **Python 3.10+**，并且三个客户端已在本地登录过账号。
+确保已安装 **Python 3.10+**，并且各客户端已在本地登录过账号。
 
 ```bash
 git clone https://github.com/iii765/AI-Agent-Daily-Checkin.git
@@ -97,23 +100,27 @@ python auto_checkin.py --force
 
 终端输出示例：
 ```text
-2026-11-04 00:05:02 [INFO] ========== 开始执行每日自动签到 (2026-11-04) ==========
-2026-11-04 00:05:12 [INFO] [MiniMax Code] 刚刚签到成功！获得积分: +400 (通道: L1_WEBPACK_API)
-2026-11-04 00:05:25 [INFO] [WorkBuddy] 刚刚签到成功！获得积分: +100 (通道: L1_WB_IPC)
-2026-11-04 00:05:38 [INFO] [TRAE CN] 刚刚签到成功！获得积分: +200 (通道: L1_VSCODE_IPC)
-2026-11-04 00:05:38 [INFO] ========== 签到汇总 ==========
-✅ MiniMax Code: 刚刚签到成功 (+400 积分)
-✅ WorkBuddy: 刚刚签到成功 (+100 积分)
-✅ TRAE CN: 刚刚签到成功 (+200 积分)
+2026-11-04 10:49:19 [INFO] ========== 开始执行每日自动签到 (2026-11-04) ==========
+2026-11-04 10:49:28 [INFO] [MiniMax Code] 今日已签！获得积分: +400 (通道: L1_WEBPACK_API)
+2026-11-04 10:49:39 [INFO] [WorkBuddy] 今日已签！获得积分: +100 (通道: L1_WB_IPC)
+2026-11-04 10:49:53 [INFO] [TRAE CN] 今日已签！获得积分: +200 (通道: L1_VSCODE_IPC)
+2026-11-04 10:50:14 [INFO] [Qoder CN] 今日已签！获得积分: +100 (通道: L1_QODER_SURFACE)
+2026-11-04 10:50:33 [INFO] [豆包] 今日已签！获得积分: +200 (通道: L1_DOUBAO_EXPLORE)
+2026-11-04 10:50:33 [INFO] ========== 签到汇总 ==========
+✅ MiniMax Code: 今日已签 (+400 积分)
+✅ WorkBuddy: 今日已签 (+100 积分)
+✅ TRAE CN: 今日已签 (+200 积分)
+✅ Qoder CN: 今日已签 (+100 积分)
+✅ 豆包: 今日已签 (+200 积分)
 ```
 
 ### 3. 开启全自动无人值守（推荐）
 
 双击运行 **[`开启每日自动签到.bat`](./开启每日自动签到.bat)**（或执行 `powershell -ExecutionPolicy Bypass -File setup_schedule.ps1`），脚本会自动完成三件事（无需管理员权限）：
 
-1. **注册每日凌晨 `00:05` 定时任务**（`AgentAppsDailyCheckin`）：适合夜猫子开发者，跨过零点自动领完新一天的积分。
-2. **创建开机登录自启快捷方式**：如果你头天晚上关机睡觉了，第二天开机登录 Windows 时会自动检测并补签；若凌晨 `00:05` 已签过，开机检测会在 `0.001 秒` 内无感跳过。
-3. **为桌面快捷方式注入调试端口**：让你平时手动打开客户端写代码时自带 CDP 端口，半夜 `00:05` 签到时直接无感附着，绝不重启你的编辑器窗口。
+1. **注册每日凌晨 `00:05` 定时任务**（`AgentAppsDailyCheckin`）：跨过零点自动领完新一天的积分福利。
+2. **创建开机登录自启快捷方式**：如果头天晚上关机睡觉了，第二天开机登录 Windows 时会自动检测并补签；若凌晨 `00:05` 已签过，开机检测会在 `0.001 秒` 内无感秒退。
+3. **为桌面与开始菜单快捷方式注入调试端口**：让你平时手动打开客户端写代码时自带 CDP 端口，半夜 `00:05` 签到时直接无感附着，绝不重启或打断你正在编辑的代码窗口。
 
 ---
 
@@ -132,6 +139,8 @@ python auto_checkin.py --force
 python auto_checkin.py --app minimax_code --force
 python auto_checkin.py --app workbuddy --force
 python auto_checkin.py --app trae_cn --force
+python auto_checkin.py --app qoder_cn --force
+python auto_checkin.py --app doubao --force
 ```
 
 ### 自定义客户端安装路径
@@ -142,6 +151,8 @@ python auto_checkin.py --app trae_cn --force
 $env:CHECKIN_EXE_MINIMAX_CODE = "D:\CustomPath\MiniMax Code\MiniMax Code.exe"
 $env:CHECKIN_EXE_WORKBUDDY    = "D:\CustomPath\WorkBuddy\WorkBuddy.exe"
 $env:CHECKIN_EXE_TRAE_CN      = "D:\CustomPath\Trae CN\Trae CN.exe"
+$env:CHECKIN_EXE_QODER_CN     = "D:\CustomPath\Qoder CN\Qoder CN.exe"
+$env:CHECKIN_EXE_DOUBAO       = "D:\CustomPath\Doubao\Doubao.exe"
 ```
 
 ---
