@@ -66,13 +66,13 @@ flowchart LR
 
 ### 各客户端逆向通道一览
 
-| 客户端 | 默认调试端口 | L1 内部直调通道（主力） | L2 DOM 选择器（兜底） | 典型每日积分收益 |
+| 客户端 | 默认调试端口 | L1 内部直调与余额查询通道（主力） | L2 DOM 选择器（兜底） | 典型每日积分收益 |
 | :--- | :---: | :--- | :--- | :---: |
-| **MiniMax Code** | `19221` | 通过 `window.webpackChunk_N_E` 提取内置带签名拦截器的 Axios 实例（模块 `98304`），自动携带 `yy` / `x-signature` 调 `POST /minimax-cloud/api/v1/signin/claim` | `button.signin-claim-button` | **+400~1000 积分** |
-| **WorkBuddy** | `19222` | 调用 Preload 暴露的 `window.__wbInvoke('auth:getCheckinStatus')` 与 `window.__wbInvoke('auth:claimDailyCheckin')` | `button:has-text('立即领取')` | **+100 积分 (连签加成)** |
-| **TRAE CN** | `19223` | 调用 `window.vscode.ipcRenderer.invoke('vscode:sandbox::main-invoke-claimCheckinCredits', 'account_menu')` 并自动检测参与 `participateCheckinLottery` 抽奖 | 账号菜单签到入口 | **+200~300 Credits** |
-| **Qoder CN** | `19224` | 通过 `window.qoderDesktop` 监测活动状态，唤起权益中心 Surface 自动完成 `01a159a1` 每日 100 Credits 任务领取 | 权益中心卡片按钮 | **+100 Credits** |
-| **豆包 (Doubao)** | `19225` | 在 Chromium 容器同会话下无感直连 `pc/agent-explore?scroll_to=tasks` 触发签到，并通过 `UgCampaignApiService` 校验状态 | 每日签到专区按钮 | **+200 算力** |
+| **MiniMax Code** | `19221` | 通过 `window.webpackChunk_N_E` 提取内置 Axios 实例（模块 `98304`），调 `POST /signin/claim` 并汇总 `GET /credit/details` 未过期剩余积分 | `button.signin-claim-button` | **+400~1000 积分** |
+| **WorkBuddy** | `19222` | 调用 Preload `window.__wbInvoke('auth:claimDailyCheckin')` 与 `'auth:getAccountUsage'` 读取精确 `usageLeft` 剩余额度 | `button:has-text('立即领取')` | **+100 积分 (连签加成)** |
+| **TRAE CN** | `19223` | 调用 `vscode:sandbox::main-invoke-claimCheckinCredits` + `participateCheckinLottery` 抽奖，并携带 JWT 请求 `/trae/api/v2/pay/ide_user_ent_usage` 获取余额 | 账号菜单签到入口 | **+200~300 Credits** |
+| **Qoder CN** | `19224` | 通过 `window.qoderDesktop` 唤起权益中心 Surface 领每日 Credits，并调 `getAccountUsage()` 统计所有可用配额池剩余总量 | 权益中心卡片按钮 | **+100 Credits** |
+| **豆包 (Doubao)** | `19225` | 同会话下直连 `pc/agent-explore?scroll_to=tasks` 完成签到，并自动读取 `member/quota-management` 的 `subscription/overview` 实时余额 | 每日签到专区按钮 | **+200~400 算力** |
 
 ---
 
@@ -98,20 +98,20 @@ pip install -r requirements.txt
 python auto_checkin.py --force
 ```
 
-终端输出示例：
+终端输出示例（桌面气泡通知也会同步显示每日新增与剩余总额）：
 ```text
-2026-11-04 10:49:19 [INFO] ========== 开始执行每日自动签到 (2026-11-04) ==========
-2026-11-04 10:49:28 [INFO] [MiniMax Code] 今日已签！获得积分: +400 (通道: L1_WEBPACK_API)
-2026-11-04 10:49:39 [INFO] [WorkBuddy] 今日已签！获得积分: +100 (通道: L1_WB_IPC)
-2026-11-04 10:49:53 [INFO] [TRAE CN] 今日已签！获得积分: +200 (通道: L1_VSCODE_IPC)
-2026-11-04 10:50:14 [INFO] [Qoder CN] 今日已签！获得积分: +100 (通道: L1_QODER_SURFACE)
-2026-11-04 10:50:33 [INFO] [豆包] 今日已签！获得积分: +200 (通道: L1_DOUBAO_EXPLORE)
-2026-11-04 10:50:33 [INFO] ========== 签到汇总 ==========
-✅ MiniMax Code: 今日已签 (+400 积分)
-✅ WorkBuddy: 今日已签 (+100 积分)
-✅ TRAE CN: 今日已签 (+200 积分)
-✅ Qoder CN: 今日已签 (+100 积分)
-✅ 豆包: 今日已签 (+200 积分)
+2026-11-10 12:47:18 [INFO] ========== 开始执行每日自动签到 (2026-11-10) ==========
+2026-11-10 12:47:28 [INFO] [MiniMax Code] 刚刚签到成功！获得积分: +1000 | 剩余: 8563.8 (通道: L1_WEBPACK_API)
+2026-11-10 12:47:39 [INFO] [WorkBuddy] 刚刚签到成功！获得积分: +100 | 剩余: 2592 (通道: L1_WB_IPC)
+2026-11-10 12:47:52 [INFO] [TRAE CN] 刚刚签到成功！获得积分: +200 | 剩余: 1500 (通道: L1_VSCODE_IPC)
+2026-11-10 12:48:09 [INFO] [Qoder CN] 刚刚签到成功！获得积分: +100 | 剩余: 600 (通道: L1_QODER_SURFACE)
+2026-11-10 12:48:24 [INFO] [豆包] 刚刚签到成功！获得积分: +200 | 剩余: 3700(赠1600) (通道: L1_DOUBAO_EXPLORE)
+2026-11-10 12:48:24 [INFO] ========== 签到汇总 ==========
+✅ MiniMax Code: 刚刚签到成功 (+1000 积分 | 剩余: 8563.8)
+✅ WorkBuddy: 刚刚签到成功 (+100 积分 | 剩余: 2592)
+✅ TRAE CN: 刚刚签到成功 (+200 积分 | 剩余: 1500)
+✅ Qoder CN: 刚刚签到成功 (+100 积分 | 剩余: 600)
+✅ 豆包: 刚刚签到成功 (+200 积分 | 剩余: 3700(赠1600))
 ```
 
 ### 3. 开启全自动无人值守（推荐）

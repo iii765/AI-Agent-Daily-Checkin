@@ -143,6 +143,53 @@ def save_state(state: Dict[str, Any]) -> None:
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def format_num(val: Any) -> str:
+    """格式化积分数值：整数省略小数位，浮点保留必要小数并去除多余尾零"""
+    if val is None:
+        return "?"
+    try:
+        num = float(val)
+        if num.is_integer():
+            return str(int(num))
+        return f"{num:.2f}".rstrip("0").rstrip(".")
+    except Exception:
+        return str(val)
+
+
+def parse_doubao_overview(data: Dict[str, Any]) -> Dict[str, float]:
+    """从豆包 subscription/overview 响应中解析活动赠送剩余额度与周期套餐剩余额度"""
+    def _to_float(s: Any) -> float:
+        try:
+            return float(str(s or "0").replace(",", "").strip())
+        except Exception:
+            return 0.0
+
+    incentive_rem = 0.0
+    for grp in data.get("incentive_quota_section", {}).get("window_limit_groups", []):
+        for wl in grp.get("window_limits", []):
+            incentive_rem += max(_to_float(wl.get("total_amount")) - _to_float(wl.get("used_amount")), 0.0)
+
+    if incentive_rem == 0.0 and data.get("incentive_quota_entitlements"):
+        for item in data["incentive_quota_entitlements"]:
+            incentive_rem += max(_to_float(item.get("total_amount")) - _to_float(item.get("used_amount")), 0.0)
+
+    window_rem = 0.0
+    for grp in data.get("window_limit_section", {}).get("window_limit_groups", []):
+        for wl in grp.get("window_limits", []):
+            window_rem += max(_to_float(wl.get("total_amount")) - _to_float(wl.get("used_amount")), 0.0)
+
+    pkg_rem = 0.0
+    for grp in data.get("package_entitlement_groups", []) + data.get("quota_package_entitlement_groups", []):
+        for wl in grp.get("window_limits", []):
+            pkg_rem += max(_to_float(wl.get("total_amount")) - _to_float(wl.get("used_amount")), 0.0)
+
+    return {
+        "remaining": incentive_rem + window_rem + pkg_rem,
+        "incentive_remaining": incentive_rem,
+        "window_remaining": window_rem,
+    }
+
+
 def is_process_running(exe_name: str) -> bool:
     try:
         out = subprocess.check_output(
@@ -239,7 +286,7 @@ async def find_target_page(browser, url_keywords: list[str]) -> Optional[Page]:
 
 
 # ============================================================================
-# 1. MiniMax Code 签到实现（L1: Webpack Axios 实例直调 + L2: DOM 按钮点击兜底）
+# 1. MiniMax Code 签到实现（L1: Webpack Axios 实例直调 + 余额统计 + L2 DOM 兜底）
 # ============================================================================
 async def checkin_minimax_code(page: Page) -> Dict[str, Any]:
     for _ in range(25):
@@ -252,7 +299,7 @@ async def checkin_minimax_code(page: Page) -> Dict[str, Any]:
         await asyncio.sleep(0.8)
     await asyncio.sleep(2.5)
 
-    # L1: 直接通过内部已鉴权带签名的 Axios (module 98304) 调用签到接口
+    # L1: 直接通过内部已鉴权带签名的 Axios (module 98304) 调用签到与余额接口
     try:
         res = await page.evaluate(
             """async () => {
@@ -265,6 +312,32 @@ async def checkin_minimax_code(page: Page) -> Dict[str, Any]:
                 return { ok: false, error: '获取 webpack require 失败' };
             }
             const http = wpReq(98304).ZP;
+
+            const fetchRemainingCredits = async () => {
+                try {
+                    let sum = 0;
+                    let pageNo = 1;
+                    const pageSize = 100;
+                    const nowMs = Date.now();
+                    while (true) {
+                        const r = await http.get(`/minimax-cloud/api/v1/credit/details?page=${pageNo}&page_size=${pageSize}`, { showToast: false });
+                        const d = r?.data;
+                        const list = d?.details || [];
+                        for (const item of list) {
+                            if (!item.expire_at_ms || item.expire_at_ms > nowMs) {
+                                sum += parseFloat(item.remaining_amount || 0);
+                            }
+                        }
+                        const total = d?.total_count || list.length;
+                        if (pageNo * pageSize >= total || list.length === 0) break;
+                        pageNo += 1;
+                    }
+                    return Math.round(sum * 100) / 100;
+                } catch (e) {
+                    return null;
+                }
+            };
+
             const statusResp = await http.get('/minimax-cloud/api/v1/signin/status', { showToast: false });
             const data = statusResp.data?.data;
             const todayInfo = data?.days?.find(d => d.is_today) || data?.days?.find(d => d.status === 2);
@@ -272,22 +345,27 @@ async def checkin_minimax_code(page: Page) -> Dict[str, Any]:
             const claimedToday = data?.days?.some(d => d.is_today && d.status === 3);
 
             if (claimedToday && !claimable) {
+                const remaining = await fetchRemainingCredits();
                 return {
                     ok: true,
                     already_claimed: true,
                     points: todayInfo?.points || 0,
                     day_no: todayInfo?.day_no || 0,
+                    remaining,
                     method: 'L1_WEBPACK_API'
                 };
             }
             if (claimable) {
                 const claimResp = await http.post('/minimax-cloud/api/v1/signin/claim', {}, { showToast: false });
                 const cData = claimResp.data?.data;
+                await new Promise(r => setTimeout(r, 400));
+                const remaining = await fetchRemainingCredits();
                 return {
                     ok: true,
                     already_claimed: false,
                     points: cData?.points || todayInfo?.points || 0,
                     day_no: cData?.day_no || todayInfo?.day_no || 0,
+                    remaining,
                     method: 'L1_WEBPACK_API'
                 };
             }
@@ -304,13 +382,13 @@ async def checkin_minimax_code(page: Page) -> Dict[str, Any]:
     if await btn.count() > 0:
         await btn.first.click()
         await asyncio.sleep(2)
-        return {"ok": True, "already_claimed": False, "points": 0, "method": "L2_DOM_CLICK"}
+        return {"ok": True, "already_claimed": False, "points": 0, "remaining": None, "method": "L2_DOM_CLICK"}
 
     return {"ok": False, "error": "L1 与 L2 均未完成签到"}
 
 
 # ============================================================================
-# 2. WorkBuddy 签到实现（L1: Preload __wbInvoke IPC 直调 + L2: DOM 按钮点击兜底）
+# 2. WorkBuddy 签到实现（L1: Preload __wbInvoke IPC 直调 + 余额查询 + L2 DOM 兜底）
 # ============================================================================
 async def checkin_workbuddy(page: Page) -> Dict[str, Any]:
     for _ in range(20):
@@ -320,31 +398,49 @@ async def checkin_workbuddy(page: Page) -> Dict[str, Any]:
         await asyncio.sleep(0.8)
     await asyncio.sleep(2.5)
 
-    # L1: 直接调用 Electron Preload 暴露的 __wbInvoke('auth:claimDailyCheckin')
+    # L1: 直接调用 Electron Preload 暴露的 __wbInvoke('auth:claimDailyCheckin') 与 'auth:getAccountUsage'
     try:
         res = await page.evaluate(
             """async () => {
+            const getRemainingCredits = async () => {
+                try {
+                    const usage = await window.__wbInvoke('auth:getAccountUsage');
+                    if (usage && usage.usageLeft !== undefined && usage.usageLeft !== null) {
+                        return parseFloat(usage.usageLeft);
+                    }
+                    if (Array.isArray(usage?.resources)) {
+                        return usage.resources.reduce((s, r) => s + Number(r.left || 0), 0);
+                    }
+                } catch (e) {}
+                return null;
+            };
+
             const status = await window.__wbInvoke('auth:getCheckinStatus');
             if (!status) {
                 return { ok: false, error: '获取签到状态为空' };
             }
             if (status.today_checked_in) {
+                const remaining = await getRemainingCredits();
                 return {
                     ok: true,
                     already_claimed: true,
                     points: status.today_credit || status.daily_credit || 100,
                     streak_days: status.streak_days || 0,
                     total_credits: status.total_credits || 0,
+                    remaining,
                     method: 'L1_WB_IPC'
                 };
             }
             const claim = await window.__wbInvoke('auth:claimDailyCheckin');
             if (claim && (claim.credit || claim.streak_days)) {
+                await new Promise(r => setTimeout(r, 400));
+                const remaining = await getRemainingCredits();
                 return {
                     ok: true,
                     already_claimed: false,
                     points: claim.credit || status.today_credit || 100,
                     streak_days: claim.streak_days || (status.streak_days + 1),
+                    remaining,
                     method: 'L1_WB_IPC'
                 };
             }
@@ -361,13 +457,13 @@ async def checkin_workbuddy(page: Page) -> Dict[str, Any]:
     if await claim_btn.count() > 0:
         await claim_btn.first.click()
         await asyncio.sleep(2)
-        return {"ok": True, "already_claimed": False, "points": 100, "method": "L2_DOM_CLICK"}
+        return {"ok": True, "already_claimed": False, "points": 100, "remaining": None, "method": "L2_DOM_CLICK"}
 
     return {"ok": False, "error": "L1 与 L2 均未完成签到"}
 
 
 # ============================================================================
-# 3. TRAE CN 签到实现（L1: vscode.ipcRenderer 沙盒通道直调 + 抽奖检测）
+# 3. TRAE CN 签到实现（L1: vscode.ipcRenderer 沙盒通道直调 + 抽奖 + v2 余额查询）
 # ============================================================================
 async def checkin_trae_cn(page: Page) -> Dict[str, Any]:
     for _ in range(25):
@@ -381,6 +477,37 @@ async def checkin_trae_cn(page: Page) -> Dict[str, Any]:
         res = await page.evaluate(
             """async () => {
             const ipc = window.vscode.ipcRenderer;
+
+            const fetchRemainingCredits = async () => {
+                try {
+                    const userInfo = await ipc.invoke('vscode:sandbox::main-invoke-getUserInfo');
+                    if (!userInfo?.token) return null;
+                    const host = userInfo.host || 'https://api.trae.cn';
+                    const resp = await fetch(`${host}/trae/api/v2/pay/ide_user_ent_usage`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Cloud-IDE-JWT ${userInfo.token}`
+                        },
+                        body: JSON.stringify({ require_usage: true, req_source: 2 })
+                    });
+                    const d = await resp.json();
+                    if (d?.usage_summary && typeof d.usage_summary.total_amount === 'number') {
+                        return Math.max(d.usage_summary.total_amount - (d.usage_summary.consumed_amount || 0), 0);
+                    }
+                    const packs = d?.user_entitlement_pack_list || [];
+                    let rem = 0;
+                    for (const p of packs) {
+                        const limit = p?.entitlement_base_info?.quota?.credits_limit || 0;
+                        const used = p?.usage?.credits_amount || 0;
+                        if (limit > 0) rem += Math.max(limit - used, 0);
+                    }
+                    return rem;
+                } catch (e) {
+                    return null;
+                }
+            };
+
             const statusResp = await ipc.invoke('vscode:sandbox::main-invoke-fetchCheckinCreditsStatus');
             const sData = statusResp?.data;
             if (!sData) {
@@ -388,12 +515,14 @@ async def checkin_trae_cn(page: Page) -> Dict[str, Any]:
             }
             const totalPts = (sData.credits || 0) + (sData.extra_credits || 0);
             if (sData.checked_in || sData.did_checked_in) {
+                const remaining = await fetchRemainingCredits();
                 return {
                     ok: true,
                     already_claimed: true,
                     points: totalPts,
                     credits: sData.credits || 0,
                     extra_credits: sData.extra_credits || 0,
+                    remaining,
                     method: 'L1_VSCODE_IPC'
                 };
             }
@@ -410,12 +539,15 @@ async def checkin_trae_cn(page: Page) -> Dict[str, Any]:
                             lotteryRes = await ipc.invoke('vscode:sandbox::main-invoke-participateCheckinLottery', 'account_menu');
                         }
                     } catch (e) {}
+                    await new Promise(r => setTimeout(r, 600));
+                    const remaining = await fetchRemainingCredits();
                     return {
                         ok: true,
                         already_claimed: cCode === 9095,
                         points: totalPts,
                         credits: sData.credits || 0,
                         extra_credits: sData.extra_credits || 0,
+                        remaining,
                         lottery: lotteryRes,
                         method: 'L1_VSCODE_IPC'
                     };
@@ -433,8 +565,31 @@ async def checkin_trae_cn(page: Page) -> Dict[str, Any]:
 
 
 # ============================================================================
-# 4. Qoder CN 签到实现（L1: Preload qoderDesktop + 权益中心 Surface 直达）
+# 4. Qoder CN 签到实现（L1: Preload qoderDesktop + 权益中心 Surface + 额度查询）
 # ============================================================================
+async def _get_qoder_remaining_credits(page: Page) -> Optional[float]:
+    try:
+        return await page.evaluate(
+            """async () => {
+            const usage = await window.qoderDesktop.getAccountUsage();
+            const uq = usage?.qoderUsage;
+            if (!uq) return null;
+            let rem = (uq.userQuota?.remaining || 0) + (uq.addOnQuota?.remaining || 0);
+            if (Array.isArray(uq.dedicatedResourcePackages)) {
+                for (const pkg of uq.dedicatedResourcePackages) {
+                    rem += (pkg?.remaining || 0);
+                }
+            }
+            if (uq.orgResourcePackage?.remaining) {
+                rem += uq.orgResourcePackage.remaining;
+            }
+            return rem;
+        }"""
+        )
+    except Exception:
+        return None
+
+
 async def checkin_qoder_cn(page: Page) -> Dict[str, Any]:
     for _ in range(25):
         has_qd = await page.evaluate("() => Boolean(window.qoderDesktop?.getCampaignStatus)")
@@ -443,13 +598,12 @@ async def checkin_qoder_cn(page: Page) -> Dict[str, Any]:
         await asyncio.sleep(0.8)
     await asyncio.sleep(2.0)
 
-    # 读取当前活动状态与账户已分配额度
+    # 读取当前活动状态
     status = await page.evaluate(
         """async () => {
         try {
             const camp = await window.qoderDesktop.getCampaignStatus();
-            const usage = await window.qoderDesktop.getAccountUsage();
-            return { ok: true, camp, usage };
+            return { ok: true, camp };
         } catch (e) {
             return { ok: false, error: e.message };
         }
@@ -457,7 +611,6 @@ async def checkin_qoder_cn(page: Page) -> Dict[str, Any]:
     )
 
     has_claimable = status.get("camp", {}).get("hasClaimableCampaign", False)
-    credits_pts = status.get("usage", {}).get("qoderUsage", {}).get("addOnQuota", {}).get("remaining", 100)
 
     # 尝试触发打开用户菜单 -> 权益中心
     try:
@@ -487,6 +640,7 @@ async def checkin_qoder_cn(page: Page) -> Dict[str, Any]:
             break
         await asyncio.sleep(0.5)
 
+    daily_pts = 100
     if iframe:
         try:
             claim_btns = iframe.locator('button:has-text("立即领取"), button:has-text("领取")')
@@ -503,26 +657,33 @@ async def checkin_qoder_cn(page: Page) -> Dict[str, Any]:
                     break
 
             iframe_text = await iframe.evaluate("() => document.body.innerText")
+            m_pts = __import__("re").search(r"(?:每天领|\+)\s*(\d+)\s*Credits", iframe_text)
+            if m_pts:
+                daily_pts = int(m_pts.group(1))
             is_claimed = "已领取" in iframe_text or not has_claimable
 
             # 按 Escape 平滑关闭弹窗
             await page.keyboard.press("Escape")
             await asyncio.sleep(0.5)
 
+            remaining = await _get_qoder_remaining_credits(page)
             return {
                 "ok": True,
                 "already_claimed": not claimed_now and is_claimed,
-                "points": credits_pts or 100,
+                "points": daily_pts,
+                "remaining": remaining,
                 "method": "L1_QODER_SURFACE",
             }
         except Exception as e:
             logger.warning(f"[Qoder CN] 权益中心 iframe 操作异常: {e}")
 
     if status.get("ok"):
+        remaining = await _get_qoder_remaining_credits(page)
         return {
             "ok": True,
             "already_claimed": not has_claimable,
-            "points": credits_pts or 100,
+            "points": daily_pts,
+            "remaining": remaining,
             "method": "L1_QODER_DESKTOP",
         }
 
@@ -530,7 +691,7 @@ async def checkin_qoder_cn(page: Page) -> Dict[str, Any]:
 
 
 # ============================================================================
-# 5. 豆包 (Doubao) 签到实现（L1: 任务专区页面一键签到 + Webpack API 状态校验）
+# 5. 豆包 (Doubao) 签到实现（L1: 任务专区页面一键签到 + 额度管理页实时余额）
 # ============================================================================
 async def checkin_doubao(page: Page) -> Dict[str, Any]:
     # 豆包桌面客户端基于 Chromium，在同一会话下打开任务专区执行无感签到
@@ -552,6 +713,16 @@ async def checkin_doubao(page: Page) -> Dict[str, Any]:
             await asyncio.sleep(0.8)
         await asyncio.sleep(1.5)
 
+        # 读取今日签到对应的额度数值（普通 +200，周一翻倍 +400）
+        daily_pts = 200
+        try:
+            pre_text = await explore_page.evaluate("() => document.body.innerText")
+            m_daily = __import__("re").search(r"每日签到\s*\+\s*(\d+)", pre_text)
+            if m_daily:
+                daily_pts = int(m_daily.group(1))
+        except Exception:
+            pass
+
         # 查找每日签到按钮
         claimed_now = False
         checkin_btn = explore_page.locator("button:has-text('签到'), button:has-text('去签到')")
@@ -570,42 +741,82 @@ async def checkin_doubao(page: Page) -> Dict[str, Any]:
         page_text = await explore_page.evaluate("() => document.body.innerText")
         is_checked_in = "已签到" in page_text or claimed_now or "签到成功" in page_text or "每日签到" in page_text
 
-        if is_checked_in:
-            return {
-                "ok": True,
-                "already_claimed": not claimed_now,
-                "points": 200,
-                "method": "L1_DOUBAO_EXPLORE",
-            }
+        # 若未在探索页找到，再通过 Webpack API 确认一次签到状态
+        used_api_fallback = False
+        if not is_checked_in:
+            try:
+                res = await page.evaluate(
+                    """async () => {
+                    let webpackReq;
+                    const w = window["@flow-web/desktop:stable"];
+                    if (Array.isArray(w)) {
+                        w.push([[Symbol()], {}, r => { webpackReq = r; }]);
+                    }
+                    if (!webpackReq) return null;
+                    const ugApi = webpackReq(534252);
+                    if (!ugApi?.k) return null;
+                    const lp = await ugApi.k.GetLandingPage({ scene: 'pc_incentive_task_mvp_v3' });
+                    return lp?.data;
+                }"""
+                )
+                if res:
+                    is_checked_in = True
+                    used_api_fallback = True
+                    claimed_now = res.get("chosen_type") != 2
+            except Exception:
+                pass
 
-        # 兜底：通过内置 Webpack 模块检验签到状态
+        if not is_checked_in:
+            return {"ok": False, "error": "未找到豆包签到状态或任务已下线"}
+
+        # 跳转到额度管理页面实时捕获 /subscription/overview/ 精确余额
+        remaining_val = None
+        remaining_text = None
+        overview_data = {}
+
+        async def on_overview_resp(resp):
+            if "commerce/sale/subscription/overview" in resp.url:
+                try:
+                    j = json.loads(await resp.text())
+                    if j.get("code") == 0 and isinstance(j.get("data"), dict):
+                        overview_data.update(j["data"])
+                except Exception:
+                    pass
+
+        explore_page.on("response", on_overview_resp)
         try:
-            res = await page.evaluate(
-                """async () => {
-                let webpackReq;
-                const w = window["@flow-web/desktop:stable"];
-                if (Array.isArray(w)) {
-                    w.push([[Symbol()], {}, r => { webpackReq = r; }]);
-                }
-                if (!webpackReq) return null;
-                const ugApi = webpackReq(534252);
-                if (!ugApi?.k) return null;
-                const lp = await ugApi.k.GetLandingPage({ scene: 'pc_incentive_task_mvp_v3' });
-                return lp?.data;
-            }"""
-            )
-            if res:
-                chosen = res.get("chosen_type")
-                return {
-                    "ok": True,
-                    "already_claimed": chosen == 2,
-                    "points": 200,
-                    "method": "L1_DOUBAO_API",
-                }
-        except Exception:
-            pass
+            await explore_page.goto("https://www.doubao.com/member/quota-management?platform=desktop", timeout=20000)
+            for _ in range(15):
+                if overview_data:
+                    break
+                await asyncio.sleep(0.4)
 
-        return {"ok": False, "error": "未找到豆包签到状态或任务已下线"}
+            if overview_data:
+                parsed = parse_doubao_overview(overview_data)
+                remaining_val = parsed["remaining"]
+                inc_rem = parsed["incentive_remaining"]
+                win_rem = parsed["window_remaining"]
+                if inc_rem > 0 and win_rem > 0:
+                    remaining_text = f"{format_num(remaining_val)}(赠{format_num(inc_rem)})"
+                else:
+                    remaining_text = format_num(remaining_val)
+            else:
+                # 若 API 未拦截到，从探索页累计额度文本提取兜底
+                m_cum = __import__("re").search(r"累计获得额度[：:]\s*([\d,]+)", page_text)
+                if m_cum:
+                    remaining_val = float(m_cum.group(1).replace(",", ""))
+                    remaining_text = f"赠{format_num(remaining_val)}"
+        except Exception as e:
+            logger.debug(f"[豆包] 读取额度管理页面异常: {e}")
+
+        return {
+            "ok": True,
+            "already_claimed": not claimed_now,
+            "points": daily_pts,
+            "remaining": remaining_val,
+            "remaining_text": remaining_text,
+            "method": "L1_DOUBAO_API" if used_api_fallback else "L1_DOUBAO_EXPLORE",
+        }
     finally:
         try:
             await explore_page.close()
@@ -764,6 +975,7 @@ async def main() -> None:
 
     target_keys = [args.app] if args.app else list(APP_CONFIGS.keys())
     summary_lines = []
+    notify_lines = []
     did_actual_work = False
 
     logger.info(f"========== 开始执行每日自动签到 ({today}) ==========")
@@ -774,28 +986,48 @@ async def main() -> None:
 
         if not args.force and today_state.get(key, {}).get("ok"):
             pts = today_state[key].get("points", 0)
-            logger.info(f"[{name}] 今日记录已签到 (+{pts} 积分)，跳过启动（使用 --force 可强制复查）")
-            summary_lines.append(f"✅ {name}: 今日已签 (+{pts} 积分)")
+            rem_text = today_state[key].get("remaining_text")
+            if not rem_text and today_state[key].get("remaining") is not None:
+                rem_text = format_num(today_state[key].get("remaining"))
+            rem_suffix = f" | 剩余: {rem_text}" if rem_text else ""
+            rem_short = f" | 剩{rem_text}" if rem_text else ""
+            logger.info(f"[{name}] 今日记录已签到 (+{pts} 积分{rem_suffix})，跳过启动（使用 --force 可强制复查）")
+            summary_lines.append(f"✅ {name}: 今日已签 (+{pts} 积分{rem_suffix})")
+            notify_lines.append(f"✅ {name}: 已签+{pts}{rem_short}")
             continue
 
         did_actual_work = True
         res = await run_single_app(key, cfg)
         if res.get("ok"):
             pts = res.get("points", 0)
-            status_tag = "今日已签" if res.get("already_claimed") else "刚刚签到成功"
-            logger.info(f"[{name}] {status_tag}！获得积分: +{pts} (通道: {res.get('method')})")
+            already = bool(res.get("already_claimed"))
+            status_tag = "今日已签" if already else "刚刚签到成功"
+            short_tag = "已签" if already else "新签"
+
+            rem_val = res.get("remaining")
+            rem_text = res.get("remaining_text")
+            if not rem_text and rem_val is not None:
+                rem_text = format_num(rem_val)
+            rem_suffix = f" | 剩余: {rem_text}" if rem_text else ""
+            rem_short = f" | 剩{rem_text}" if rem_text else ""
+
+            logger.info(f"[{name}] {status_tag}！获得积分: +{pts}{rem_suffix} (通道: {res.get('method')})")
             # 脱敏保存（过滤掉可能含账号 ID 的冗余字段，方便开源环境安全使用）
             safe_detail = {
-                k: v for k, v in res.items() if k in ("ok", "already_claimed", "points", "day_no", "streak_days", "method")
+                k: v for k, v in res.items()
+                if k in ("ok", "already_claimed", "points", "remaining", "remaining_text", "day_no", "streak_days", "method")
             }
             today_state[key] = {
                 "ok": True,
                 "points": pts,
+                "remaining": rem_val,
+                "remaining_text": rem_text,
                 "status": status_tag,
                 "timestamp": datetime.now().isoformat(timespec="seconds"),
                 "detail": safe_detail,
             }
-            summary_lines.append(f"✅ {name}: {status_tag} (+{pts} 积分)")
+            summary_lines.append(f"✅ {name}: {status_tag} (+{pts} 积分{rem_suffix})")
+            notify_lines.append(f"✅ {name}: {short_tag}+{pts}{rem_short}")
         else:
             err = res.get("error", "未知错误")
             logger.error(f"[{name}] 签到失败: {err}")
@@ -805,13 +1037,15 @@ async def main() -> None:
                 "timestamp": datetime.now().isoformat(timespec="seconds"),
             }
             summary_lines.append(f"❌ {name}: 失败 ({err})")
+            notify_lines.append(f"❌ {name}: 失败 ({err})")
 
         save_state(state)
 
     summary_text = "\n".join(summary_lines)
+    notify_text = "\n".join(notify_lines)
     logger.info("========== 签到汇总 ==========\n" + summary_text)
     if did_actual_work or args.force:
-        show_windows_notification("AI 客户端每日签到完成", summary_text)
+        show_windows_notification("AI 客户端每日签到完成", notify_text)
 
 
 if __name__ == "__main__":
