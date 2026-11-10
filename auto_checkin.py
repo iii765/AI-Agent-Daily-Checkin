@@ -177,6 +177,27 @@ def kill_process_tree(pid: int) -> None:
         pass
 
 
+def kill_temp_app_processes(pid: Optional[int], proc_name: str) -> None:
+    """彻底清理脚本临时拉起的客户端进程树。
+    针对多层 Launcher Stub 架构应用（如 豆包 Doubao.exe 启动器拉起 app\\Doubao.exe 后即自行退出），
+    在按 PID 杀树后按进程映像名兜底强杀残留子进程树，确保签完即走不留后台/桌面窗口。
+    """
+    if pid:
+        kill_process_tree(pid)
+        time.sleep(0.3)
+
+    if proc_name and is_process_running(proc_name):
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/IM", proc_name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except Exception:
+            pass
+
+
 async def wait_for_cdp(port: int, url_keywords: list[str], timeout_sec: int = 25) -> bool:
     client = httpx.Client(trust_env=False, timeout=1.5)
     deadline = time.time() + timeout_sec
@@ -636,8 +657,8 @@ async def run_single_app(app_key: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
         logger.info(f"[{name}] 检测到已开启 CDP 端口 ({port})，直接无感连接现有窗口...")
 
     if not cdp_ready:
-        if proc:
-            kill_process_tree(proc.pid)
+        if proc and not already_running:
+            kill_temp_app_processes(proc.pid, proc_name)
         return {"ok": False, "error": f"CDP 端口 {port} 连接超时"}
 
     try:
@@ -652,7 +673,7 @@ async def run_single_app(app_key: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
         # 如果原本未运行（由脚本临时拉起），签到完成后自动清理关闭进程；若用户本来就开着，则保持原样不关闭！
         if proc and not already_running:
             logger.info(f"[{name}] 签到流程结束，正在自动关闭临时客户端进程...")
-            kill_process_tree(proc.pid)
+            kill_temp_app_processes(proc.pid, proc_name)
 
 
 def show_windows_notification(title: str, message: str) -> None:
